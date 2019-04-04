@@ -307,7 +307,7 @@ func (c *Comic) makePDF() {
 		}
 		if barErr := bar.Add(i); barErr != nil {
 			log.WithFields(log.Fields{
-				"error": err,
+				"error": barErr,
 			}).Error("There was problem while increasing the progressbar")
 		}
 	}
@@ -334,7 +334,7 @@ func (c *Comic) makePDF() {
 	}
 
 	if pdf.Ok() {
-		log.Info("pdf file correctly saved")
+		log.Info("PDF file correctly saved")
 	}
 }
 
@@ -403,7 +403,9 @@ func (c *Comic) makeCBRZ() {
 		}
 
 		if barErr := bar.Add(i); barErr != nil {
-			log.Warning("There was problem while increasing the progressbar")
+			log.WithFields(log.Fields{
+				"error": barErr,
+			}).Error("There was problem while increasing the progressbar")
 		}
 	}
 	// Set progressbar to its maximum
