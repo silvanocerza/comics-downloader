@@ -96,7 +96,9 @@ func PathSetup(source, name string) (string, error) {
 	// create folders
 	err = os.MkdirAll(dir, os.ModePerm)
 	if err != nil {
-		log.Error("There was an error while creating the needed folders: ", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("There was an error while creating the needed folders")
 	}
 
 	return dir, err

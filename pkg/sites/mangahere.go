@@ -22,7 +22,11 @@ func retrieveMangaHereImageLinks(c *core.Comic) ([]string, error) {
 	response, err := soup.Get(c.URLSource)
 
 	if err != nil {
-		log.Error("[MANGAHERE] Something went wrong with: ", c.URLSource, err)
+		log.WithFields(log.Fields{
+			"source": c.Source,
+			"url":    c.URLSource,
+			"error":  err,
+		}).Error("Something went wrong")
 	}
 
 	document := soup.HTMLParse(response)
@@ -48,7 +52,11 @@ func retrieveMangaHereImageLinks(c *core.Comic) ([]string, error) {
 			imgResponse, imgResponseError := soup.Get(link)
 
 			if imgResponseError != nil {
-				log.Error("[MANGAHERE] Cannot parse: ", link, imgResponseError)
+				log.WithFields(log.Fields{
+					"source": c.Source,
+					"link":   link,
+					"error":  imgResponseError,
+				}).Error("Something went wrong")
 			}
 
 			match := re.FindAllStringSubmatch(imgResponse, -1)

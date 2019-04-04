@@ -7,7 +7,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/BakeRolls/mri"
@@ -116,10 +115,20 @@ func (c *Comic) retrieveImageFromResponse(response *http.Response) (io.Reader, s
 		// mangarock image needs to be decoded first
 		img, decErr := mri.Decode(response.Body)
 		if decErr != nil {
-			log.Error("[Mangarock] Image decode failed", decErr)
+			log.WithFields(log.Fields{
+				"error":  decErr,
+				"source": c.Source,
+			}).Error("Image decode failed")
 		}
+
 		imgData := new(bytes.Buffer)
-		util.ConvertTo8BitPNG(img, imgData)
+		if err := util.ConvertTo8BitPNG(img, imgData); err != nil {
+			log.WithFields(log.Fields{
+				"error":  err,
+				"source": c.Source,
+			}).Error("Error trying to convert the image")
+		}
+
 		content = imgData
 		tp = "png"
 	default:
@@ -133,12 +142,11 @@ func (c *Comic) retrieveImageFromResponse(response *http.Response) (io.Reader, s
 
 // makeEPUB create the epub file
 func (c *Comic) makeEPUB() {
+	var err error
 	// used to check if the epub cover already exists
 	isCoverSet := false
 	// used to add the image in the epub section
 	imgTag := `<img src="%s" alt="Cover Image" />`
-	// get the current dir
-	currentDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 	// setup a new Epub instance
 	e := epub.NewEpub(c.IssueNumber)
 	// set Epub title
@@ -150,14 +158,27 @@ func (c *Comic) makeEPUB() {
 	// in order to create an epub we'll need to download all the images so we create a tempdir for that
 	tempDir, err := ioutil.TempDir("", "comics-images")
 	if err != nil {
-		log.Error(err)
+		log.WithFields(log.Fields{
+			"error":  err,
+			"source": c.Source,
+		}).Fatal("There was a problem creating the temp directory")
 	}
 	defer os.RemoveAll(tempDir) // clean up
-	os.Chdir(tempDir)
+
+	if err = os.Chdir(tempDir); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was a problem creating the temp directory")
+	}
 	// setup the progress bar
 	bar := progressbar.New(len(c.Links))
 	// this will show up the progress bar since the beginning
-	bar.RenderBlank()
+	if barErr := bar.RenderBlank(); barErr != nil {
+		log.WithFields(log.Fields{
+			"error": barErr,
+		}).Error("There was a problem while rendering the progressbar")
+	}
+
 	for i, link := range c.Links {
 		if link != "" {
 			rsp, err := http.Get(link)
@@ -168,14 +189,27 @@ func (c *Comic) makeEPUB() {
 				// create a tempfile to store the image
 				tmpfile, err := ioutil.TempFile(tempDir, fmt.Sprintf("image.*.%s", tp))
 				defer os.Remove(tmpfile.Name()) // clean up
+
 				if err != nil {
-					log.Fatal(err)
+					log.WithFields(log.Fields{
+						"error": err,
+					}).Fatal("Unable to create tempfile")
 				}
-				io.Copy(tmpfile, content)
+
+				if _, err = io.Copy(tmpfile, content); err != nil {
+					log.WithFields(log.Fields{
+						"error":  err,
+						"url":    link,
+						"source": c.Source,
+					}).Error("Error while copying content to tempfile")
+				}
 				// add the image to the epub will return a path
 				imgpath, err := e.AddImage(tmpfile.Name(), "")
 				if err != nil {
-					log.Error("Can't add image: ", err)
+					log.WithFields(log.Fields{
+						"error":  err,
+						"source": c.Source,
+					}).Error("Can't add image")
 				}
 				// if the cover is not set we'll use the first image
 				// otherwise the image will be added as a section
@@ -183,25 +217,52 @@ func (c *Comic) makeEPUB() {
 					isCoverSet = true
 					e.SetCover(imgpath, "")
 				} else {
-					_, err := e.AddSection(fmt.Sprintf(imgTag, imgpath), "", "", "")
+					_, err = e.AddSection(fmt.Sprintf(imgTag, imgpath), "", "", "")
 					if err != nil {
-						log.Error("Can't add section: ", err)
+						log.WithFields(log.Fields{
+							"error":  err,
+							"source": c.Source,
+						}).Error("Can't add section ")
 					}
 				}
-				bar.Add(i)
 			} else {
-				log.Error("Something went wrong with url: ", link, err)
+				log.WithFields(log.Fields{
+					"error":  err,
+					"url":    link,
+					"source": c.Source,
+				}).Error("Something went wrong with the current url")
 			}
 		}
+		if barErr := bar.Add(i); barErr != nil {
+			log.WithFields(log.Fields{
+				"error": barErr,
+			}).Error("There was problem while increasing the progressbar")
+		}
 	}
-	os.Chdir(currentDir)
+	if err = os.Chdir(tempDir); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Error while trying to change directory")
+	}
 	// Set progressbar to its maximum
-	bar.Finish()
+	if err = bar.Finish(); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("Cannot set the progressbar to its maximum")
+	}
 	// get the PathSetup where the file should be saved
 	// e.g. /www.mangarock.com/comic-name/
 	dir, err := util.PathSetup(c.Source, c.Name)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was a problem while creating the manga path")
+	}
+
 	if err = e.Write(c.generateFileName(dir)); err != nil {
-		log.Error("There was an error creating the epub file: ", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was an error creating the epub file")
 	} else {
 		log.Info("EPUB correctly saved")
 	}
@@ -209,12 +270,17 @@ func (c *Comic) makeEPUB() {
 
 // makePDF create the pdf file
 func (c *Comic) makePDF() {
+	var err error
 	// setup the pdf
 	pdf := gofpdf.New("P", "mm", "A4", "")
 	// setup the progress bar
 	bar := progressbar.New(len(c.Links))
-	// this will show up the progress bar since the beginning
-	bar.RenderBlank()
+	// show up the progress bar since the beginning
+	if barErr := bar.RenderBlank(); barErr != nil {
+		log.WithFields(log.Fields{
+			"error": barErr,
+		}).Error("There was a problem while rendering the progressbar")
+	}
 	// for each link get the image to add to the pdf file
 	for i, link := range c.Links {
 		if link != "" {
@@ -225,27 +291,46 @@ func (c *Comic) makePDF() {
 				pdf.AddPage()
 				content, tp := c.retrieveImageFromResponse(rsp)
 				// The image is directly added to the pdf without being saved to the disk
-				pdf.RegisterImageOptionsReader(link, gofpdf.ImageOptions{tp, false, true}, content)
+				imageOptions := gofpdf.ImageOptions{ImageType: tp, ReadDpi: false, AllowNegativePosition: true}
+				pdf.RegisterImageOptionsReader(link, imageOptions, content)
 				// set the image position on the pdf page
 				pdf.Image(link, 0, 0, 210, 0, false, tp, 0, "")
 				// increase the progressbar
-				bar.Add(i)
 			} else {
 				log.WithFields(log.Fields{
-					"url": link,
-				}).Error("Something went wrong with the current url", err)
+					"source": c.URLSource,
+					"url":    link,
+					"error":  err,
+				}).Error("Something went wrong with the current url")
 				pdf.SetError(err)
 			}
 		}
+		if barErr := bar.Add(i); barErr != nil {
+			log.WithFields(log.Fields{
+				"error": err,
+			}).Error("There was problem while increasing the progressbar")
+		}
 	}
 	// Set progressbar to its maximum
-	bar.Finish()
+	if err = bar.Finish(); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("Cannot set the progressbar to its maximum")
+	}
 	// get the PathSetup where the file should be saved
 	// e.g. /www.mangarock.com/comic-name/
 	dir, err := util.PathSetup(c.Source, c.Name)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was a problem while creating the manga path")
+	}
+
 	// Save the pdf file
 	if err = pdf.OutputFileAndClose(c.generateFileName(dir)); err != nil {
-		log.Error("There was an error while making the PDF: ", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was an error while making the PDF")
 	}
 
 	if pdf.Ok() {
@@ -256,20 +341,32 @@ func (c *Comic) makePDF() {
 // makeCBRZ will create the CBR/CBZ
 func (c *Comic) makeCBRZ() {
 	var filesToAdd []string
+	var err error
 	// setup a new Epub instance
 	archive := archiver.NewZip()
-	currentDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 	// in order to create the archive we'll need to download all the images
 	tempDir, err := ioutil.TempDir("", "comics-images")
 	if err != nil {
-		log.Error(err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was a problem creating the temp directory")
 	}
+
 	defer os.RemoveAll(tempDir) // clean up
-	os.Chdir(tempDir)
+	if err = os.Chdir(tempDir); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was a problem while trying to change directory")
+	}
 	// setup the progress bar
 	bar := progressbar.New(len(c.Links))
-	// this will show up the progress bar since the beginning
-	bar.RenderBlank()
+	// show up the progress bar since the beginning
+	if barErr := bar.RenderBlank(); barErr != nil {
+		log.WithFields(log.Fields{
+			"error": barErr,
+		}).Error("There was a problem while rendering the progressbar")
+	}
+
 	for i, link := range c.Links {
 		if link != "" {
 			rsp, err := http.Get(link)
@@ -280,32 +377,69 @@ func (c *Comic) makeCBRZ() {
 				// create a tempfile to store the image
 				tmpfile, err := ioutil.TempFile(tempDir, fmt.Sprintf("%d-image.*.%s", i, tp))
 				defer os.Remove(tmpfile.Name()) // clean up
+
 				if err != nil {
-					log.Fatal(err)
+					log.WithFields(log.Fields{
+						"error": err,
+					}).Fatal("Unable to create tempfile")
 				}
-				io.Copy(tmpfile, content)
+
+				if _, err = io.Copy(tmpfile, content); err != nil {
+					log.WithFields(log.Fields{
+						"error":  err,
+						"url":    link,
+						"source": c.Source,
+					}).Error("Error while copying content to tempfile")
+				}
+
 				filesToAdd = append(filesToAdd, tmpfile.Name())
-				bar.Add(i)
+
 			} else {
 				log.WithFields(log.Fields{
-					"url": link,
+					"url":    link,
+					"source": c.Source,
 				}).Error("Something went wrong with the current url", err)
 			}
 		}
+
+		if barErr := bar.Add(i); barErr != nil {
+			log.Warning("There was problem while increasing the progressbar")
+		}
 	}
 	// Set progressbar to its maximum
-	bar.Finish()
-	os.Chdir(currentDir)
+	if err = bar.Finish(); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("Cannot set the progressbar to its maximum")
+	}
+
+	if err = os.Chdir(tempDir); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Error while trying to change directory")
+	}
 	// e.g. /www.mangarock.com/comic-name/
 	dir, err := util.PathSetup(c.Source, c.Name)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"source": c.Source,
+			"error":  err,
+		}).Fatal("There was a problem while creating the manga path")
+	}
 	// the archive must be created as .zip
 	// then we can change the extension to .cbr or .cbz
 	zipArchiveName := fmt.Sprintf("%s/%s.zip", dir, c.IssueNumber)
 	newName := fmt.Sprintf("%s/%s.%s", dir, c.IssueNumber, c.Format)
 	if err = archive.Archive(filesToAdd, zipArchiveName); err != nil {
-		log.Error("There was an error creating the archive: ", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("There was an error creating the archive")
 	} else {
-		os.Rename(zipArchiveName, newName)
+		if err := os.Rename(zipArchiveName, newName); err != nil {
+			log.WithFields(log.Fields{
+				"error": err,
+			}).Fatal("There was a problem while trying to rename the archive")
+		}
 		log.Info("file correctly saved")
 	}
 }
